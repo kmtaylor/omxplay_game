@@ -6,7 +6,7 @@ RPATH	:= /home/pi
 SYSROOT	:= /opt/bcm-rootfs
 TOOLCHAIN := $(TOOLS)/$(GCC_VER)/bin/$(HOST)
 
-CFLAGS += `pkg-config --cflags sdl` -I /opt/bcm-rootfs/usr/local/include
+CFLAGS += -I /opt/bcm-rootfs/usr/local/include
 CFLAGS += -I ../../omxplayer
 
 CFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_POSIX \
@@ -22,7 +22,7 @@ CFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_POSIX \
 
 LDFLAGS	:= -L /opt/bcm-rootfs/opt/vc/lib -L ../../omxplayer -Wl,-rpath=$(RPATH)
 LIBS	:= -lomxplayer -lWFC -lGLESv2 -lEGL -lbcm_host \
-	   -lopenmaxil -lvchiq_arm -lvcos -lasound -lSDL
+	   -lopenmaxil -lvchiq_arm -lvcos -lasound -lpthread 
 
 game: game.o
 	$(TOOLCHAIN)-g++ -Wall --sysroot=$(SYSROOT) $(LDFLAGS) $(LIBS) $^ -o $@
