@@ -11,12 +11,13 @@
 
 #define UART_NAME "hw:1"
 
-#define NUM_OVERLAYS	2
-#define OVERLAY_DISPLAY	0
-#define OVERLAY_LAYER	1
-#define OVERLAY_WIDTH	215
-#define OVERLAY_HEIGHT	976
-#define OVERLAY_PITCH	ALIGN_UP(OVERLAY_WIDTH * 2, 32)
+#define NUM_OVERLAYS		2
+#define OVERLAY_DISPLAY		0
+#define OVERLAY_LAYER_HIDDEN	-1
+#define OVERLAY_LAYER		1
+#define OVERLAY_WIDTH		215
+#define OVERLAY_HEIGHT		976
+#define OVERLAY_PITCH		ALIGN_UP(OVERLAY_WIDTH * 2, 32)
 
 typedef struct s_control_packet control_packet;
 
@@ -55,11 +56,11 @@ static struct s_game_data game_data;
 #define WINNER1_STREAM		3
 #define WINNER2_STREAM		4
 
-static void stream_sleep(void) {
+static void stream_sleep(int update_state) {
     pthread_mutex_lock(&game_data.lock);
     while (!game_data.change_state)
 	pthread_cond_wait(&game_data.state_changed, &game_data.lock);
-    game_data.change_state = 0;
+    if (update_state) game_data.change_state = 0;
     pthread_mutex_unlock(&game_data.lock);
 }
 
@@ -160,6 +161,12 @@ static void *data_func(void *p) {
 }
 #endif
 
+#define OVERLAY_POWER_L_1   0
+#define OVERLAY_POWER_L_2   1
+#define OVERLAY_POWER_R_1   2
+#define OVERLAY_POWER_R_2   3
+#define OVERLAY_BITMAP_L    4
+#define OVERLAY_BITMAP_R    5
 
 typedef struct {
     DISPMANX_RESOURCE_HANDLE_T  resource;
@@ -167,7 +174,7 @@ typedef struct {
     uint32_t                    vc_image_ptr;
 } dispmanx_element_t;
 
-#define NUM_DISPMANX_ELEMENTS 4
+#define NUM_DISPMANX_ELEMENTS 6
 typedef struct {
     DISPMANX_DISPLAY_HANDLE_T   display;
     DISPMANX_MODEINFO_T         info;
@@ -216,18 +223,14 @@ static void create_square(dispmanx_data_t *vars, int index,
 	image = (uint16_t *) calloc( 1, pitch * height );
 	assert(image);
 
-	/* White rectangle */
-	fill_rect( type, image, pitch, 0,  0,    
-			width,      height,      0xFFFF );
 	/* Red Rectangle */
-	fill_rect( type, image, pitch, 0,  0,    
+	if ((index == OVERLAY_POWER_R_1) || (index == OVERLAY_POWER_R_2))
+	    fill_rect( type, image, pitch, 0,  0,    
 			width,      height,      0xF800 );
 	/* Green Outline */
-	fill_rect( type, image, pitch, 20, 20,   
-			width - 40, height - 40, 0x07E0 );
-	/* Grey Rectangle */
-	fill_rect( type, image, pitch, 40, 40,   
-			width - 80, height - 80, 0x001F );
+	if ((index == OVERLAY_POWER_L_1) || (index == OVERLAY_POWER_L_2))
+	    fill_rect( type, image, pitch, 0,  0,   
+			width,	    height,	0x07E0 );
     } else image = data;
 
     vars->elements[index].resource = vc_dispmanx_resource_create( type,
@@ -245,7 +248,7 @@ static void create_square(dispmanx_data_t *vars, int index,
     if (data == NULL) free(image);
 
     /* Render element */
-    vars->update = vc_dispmanx_update_start( 10 );
+    vars->update = vc_dispmanx_update_start( 0 );
     assert( vars->update );
 
     vc_dispmanx_rect_set( &src_rect, 0, 0, width << 16, height << 16 );
@@ -253,7 +256,7 @@ static void create_square(dispmanx_data_t *vars, int index,
 
     vars->elements[index].element = vc_dispmanx_element_add(    vars->update,
                                                 vars->display,
-                                                OVERLAY_LAYER,
+                                                OVERLAY_LAYER_HIDDEN,
                                                 &dst_rect,
                                                 vars->elements[index].resource,
                                                 &src_rect,
@@ -269,7 +272,7 @@ static void create_square(dispmanx_data_t *vars, int index,
 
 static void destroy_square(dispmanx_data_t *vars, int index) {
     int ret;
-    vars->update = vc_dispmanx_update_start( 10 );
+    vars->update = vc_dispmanx_update_start( 0 );
     assert( vars->update );
     ret = vc_dispmanx_element_remove( vars->update, 
 		    vars->elements[index].element );
@@ -296,28 +299,181 @@ static void close_overlay(dispmanx_data_t *vars) {
     assert( ret == 0 );
 }
 
+static void set_visibility(dispmanx_data_t *vars, int index, int visible) {
+    int ret;
+    vars->update = vc_dispmanx_update_start( 0 );
+    assert( vars->update );
+    ret = vc_dispmanx_element_change_layer(vars->update, 
+		    vars->elements[index].element,
+		    visible ? OVERLAY_LAYER : OVERLAY_LAYER_HIDDEN);
+    assert( ret == 0 );
+    ret = vc_dispmanx_update_submit_sync( vars->update );
+    assert( ret == 0 );
+}
+
+static void toggle_visibility(dispmanx_data_t *vars, 
+			    int index_1, int visible_1,
+			    int index_2, int visible_2) {
+    int ret;
+    vars->update = vc_dispmanx_update_start( 0 );
+    assert( vars->update );
+    ret = vc_dispmanx_element_change_layer(vars->update, 
+		    vars->elements[index_1].element,
+		    visible_1 ? OVERLAY_LAYER : OVERLAY_LAYER_HIDDEN);
+    assert( ret == 0 );
+    ret = vc_dispmanx_element_change_layer(vars->update, 
+		    vars->elements[index_2].element,
+		    visible_2 ? OVERLAY_LAYER : OVERLAY_LAYER_HIDDEN);
+    assert( ret == 0 );
+    ret = vc_dispmanx_update_submit_sync( vars->update );
+    assert( ret == 0 );
+}
+
+
+static void show_overlays(dispmanx_data_t *dispmanx_data, uint16_t **overlays) {
+    int height = dispmanx_data->info.height;
+    int width = dispmanx_data->info.width;
+    create_square(dispmanx_data, OVERLAY_BITMAP_L, 
+		    width * 0.1,
+		    (height - OVERLAY_HEIGHT) / 2,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
+		    120, overlays[0]);
+    create_square(dispmanx_data, OVERLAY_BITMAP_R, 
+		    width * 0.9 - OVERLAY_WIDTH,
+		    (height - OVERLAY_HEIGHT) / 2,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
+		    120, overlays[1]);
+    set_visibility(dispmanx_data, OVERLAY_BITMAP_L, 1);
+    set_visibility(dispmanx_data, OVERLAY_BITMAP_R, 1);
+}
+
+static void hide_overlays(dispmanx_data_t *dispmanx_data) {
+    destroy_square(dispmanx_data, OVERLAY_BITMAP_L);
+    destroy_square(dispmanx_data, OVERLAY_BITMAP_R);
+}
+
+static void power_bar(dispmanx_data_t *dispmanx_data, int index, int power) {
+    int height = dispmanx_data->info.height;
+    int width = dispmanx_data->info.width;
+
+    if (power < 1) power = 1;
+    if (power > 99) power = 99;
+
+    switch (index) {
+	case OVERLAY_POWER_L_1:
+	case OVERLAY_POWER_L_2:
+	    create_square(dispmanx_data, index, 
+		    width * 0.1,
+		    (height - OVERLAY_HEIGHT) / 2 +
+				OVERLAY_HEIGHT * (100 - power) / 100,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT * power / 100,
+		    120, NULL);
+	    break;
+	case OVERLAY_POWER_R_1:
+	case OVERLAY_POWER_R_2:
+	    create_square(dispmanx_data, index, 
+		    width * 0.9 - OVERLAY_WIDTH,
+		    (height - OVERLAY_HEIGHT) / 2 +
+				OVERLAY_HEIGHT * (100 - power) / 100,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT * power / 100,
+		    120, NULL);
+	    break;
+    }
+}
+
+static void update_power_bars(dispmanx_data_t *dispmanx_data) {
+    int exit = 0;
+    int i = 1;
+    int destroy_layer_1 = 0;
+    int destroy_layer_2 = 0;
+    int current_layer = 1;
+
+    while (1) {
+	pthread_mutex_lock(&game_data.lock);
+	if (game_data.state != GAME_MODE) exit = 1;
+	pthread_mutex_unlock(&game_data.lock);
+
+	if (exit) {
+	    if (destroy_layer_2) {
+                destroy_square(dispmanx_data, OVERLAY_POWER_L_2);
+                destroy_square(dispmanx_data, OVERLAY_POWER_R_2);
+            } 	
+	    if (destroy_layer_1) {
+                destroy_square(dispmanx_data, OVERLAY_POWER_L_1);
+                destroy_square(dispmanx_data, OVERLAY_POWER_R_1);
+            }
+
+	    return;
+	}
+
+	if (current_layer == 1) {
+	    /* Create new layer */
+	    power_bar(dispmanx_data, OVERLAY_POWER_L_1, i);
+	    power_bar(dispmanx_data, OVERLAY_POWER_R_1, 100 -i);
+	    destroy_layer_1 = 1;
+
+	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_L_2, 0,
+						OVERLAY_POWER_L_1, 1);
+	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_R_2, 0,
+						OVERLAY_POWER_R_1, 1);
+
+	    /* Delete old layer */
+	    if (destroy_layer_2) {
+		destroy_square(dispmanx_data, OVERLAY_POWER_L_2);
+		destroy_square(dispmanx_data, OVERLAY_POWER_R_2);
+		destroy_layer_2 = 0;
+	    }
+
+	    current_layer = 2;
+	} else {
+	    /* Create new layer */
+	    power_bar(dispmanx_data, OVERLAY_POWER_L_2, i);
+	    power_bar(dispmanx_data, OVERLAY_POWER_R_2, 100 -i);
+	    destroy_layer_2 = 1;
+
+	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_L_1, 0,
+						OVERLAY_POWER_L_2, 1);
+	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_R_1, 0,
+						OVERLAY_POWER_R_2, 1);
+
+	    /* Delete old layer */
+	    if (destroy_layer_1) {
+		destroy_square(dispmanx_data, OVERLAY_POWER_L_1);
+		destroy_square(dispmanx_data, OVERLAY_POWER_R_1);
+		destroy_layer_1 = 0;
+	    }
+
+	    current_layer = 1;
+	}
+
+	usleep(10000);
+
+	i++;
+	if (i >= 100) i = 1;
+    }
+}
+
 static void *overlay_func(void *p) {
-    int height, width;
     dispmanx_data_t dispmanx_data;
     uint16_t **overlays = (uint16_t **) p;
 
-    stream_sleep();
-
+    stream_sleep(0);
     init_overlay(&dispmanx_data, OVERLAY_DISPLAY);
-    height = dispmanx_data.info.height;
-    width = dispmanx_data.info.width;
 
-    create_square(&dispmanx_data, 0, 
-		    0, 0,
-		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
-		    120, overlays[0]);
-    create_square(&dispmanx_data, 1, 
-		    width - OVERLAY_WIDTH, 0,
-		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
-		    120, overlays[1]);
-    sleep(500);
-    destroy_square(&dispmanx_data, 0);
-    destroy_square(&dispmanx_data, 1);
+    while (1) {
+	/* Wait for correct game mode */
+	pthread_mutex_lock(&game_data.lock);
+	while (game_data.state != GAME_MODE)
+	    pthread_cond_wait(&game_data.state_changed, &game_data.lock);
+	pthread_mutex_unlock(&game_data.lock);
+
+	show_overlays(&dispmanx_data, overlays);
+
+	/* Blocks until we leave game mode */
+	update_power_bars(&dispmanx_data);
+	
+	hide_overlays(&dispmanx_data);
+    }
 
     close_overlay(&dispmanx_data);
 
@@ -364,12 +520,12 @@ static void *stream_func(void *p) {
 	switch (game_data.state) {
 	    case ATTRACT_MODE:
 		set_stream(ATTRACT_STREAM);
-		stream_sleep();
+		stream_sleep(1);
 		break;
 
 	    case COUNTDOWN_MODE:
 		set_stream(COUNTDOWN_STREAM);
-		stream_sleep();
+		stream_sleep(1);
 		break;
 
 	    case GAME_MODE:
@@ -377,20 +533,20 @@ static void *stream_func(void *p) {
 		pthread_mutex_lock(&game_data.lock);
 		game_data.start_game = 0;
 		pthread_mutex_unlock(&game_data.lock);
-		stream_sleep();
+		stream_sleep(1);
 		break;
 
 	    case WINNER1_MODE:
 		set_stream(WINNER1_STREAM);
 		//write_uart(0x11, 0x01);
-		stream_sleep();
+		stream_sleep(1);
 		//write_uart(0x11, 0x00);
 		break;
 
 	    case WINNER2_MODE:
 		set_stream(WINNER2_STREAM);
 		//write_uart(0x12, 0x01);
-		stream_sleep();
+		stream_sleep(1);
 		//write_uart(0x12, 0x00);
 		break;
 	}
@@ -419,11 +575,11 @@ static int control_callback(OMXReader *reader) {
 }
 
 static int loop_callback(OMXReader *reader) {
+    usleep(6000000);
     pthread_mutex_lock(&game_data.lock);
     game_data.change_state = 1;
     pthread_cond_broadcast(&game_data.state_changed);
     pthread_mutex_unlock(&game_data.lock);
-    usleep(5800000);
     return 1;
 }
 
