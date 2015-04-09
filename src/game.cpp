@@ -11,8 +11,12 @@
 
 #define UART_NAME "hw:1"
 
+#define NUM_OVERLAYS	2
 #define OVERLAY_DISPLAY	0
 #define OVERLAY_LAYER	1
+#define OVERLAY_WIDTH	215
+#define OVERLAY_HEIGHT	976
+#define OVERLAY_PITCH	ALIGN_UP(OVERLAY_WIDTH * 2, 32)
 
 typedef struct s_control_packet control_packet;
 
@@ -156,9 +160,6 @@ static void *data_func(void *p) {
 }
 #endif
 
-#ifndef ALIGN_UP
-#define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
-#endif
 
 typedef struct {
     DISPMANX_RESOURCE_HANDLE_T  resource;
@@ -175,15 +176,14 @@ typedef struct {
 } dispmanx_data_t;
 
 
-static void FillRect(	VC_IMAGE_TYPE_T type, 
-			void *image, 
+static void fill_rect(	VC_IMAGE_TYPE_T type, 
+			uint16_t *image, 
 			int pitch, 
-			int aligned_height, 
 			int x, int y, int w, int h, int val ) {
     int row;
     int col;
 
-    uint16_t *line = (uint16_t *)image + y * (pitch>>1) + x;
+    uint16_t *line = image + y * (pitch>>1) + x;
 
     for ( row = 0; row < h; row++ ) {
         for ( col = 0; col < w; col++ ) {
@@ -194,15 +194,15 @@ static void FillRect(	VC_IMAGE_TYPE_T type,
 }
 
 static void create_square(dispmanx_data_t *vars, int index,
-		int x, int y, int width, int height, uint8_t opacity) {
+		int x, int y, int width, int height, uint8_t opacity,
+		uint16_t *data) {
     int ret;
     VC_RECT_T src_rect;
     VC_RECT_T dst_rect;
     VC_IMAGE_TYPE_T type = VC_IMAGE_RGB565;
     int pitch = ALIGN_UP(width*2, 32);
-    int aligned_height = ALIGN_UP(height, 16);
     VC_DISPMANX_ALPHA_T alpha; 
-    void *image;
+    uint16_t *image;
 
     /* Setup Opacity */
     alpha.flags = (DISPMANX_FLAGS_ALPHA_T) (
@@ -212,24 +212,29 @@ static void create_square(dispmanx_data_t *vars, int index,
     alpha.mask = 0;
 
     /* Allocate image and convert to VC format */
-    image = calloc( 1, pitch * height );
-    assert(image);
+    if (data == NULL) {
+	image = (uint16_t *) calloc( 1, pitch * height );
+	assert(image);
 
-    FillRect( type, image, pitch, aligned_height, 
-		    0,  0, width,      height,      0xFFFF );
-    FillRect( type, image, pitch, aligned_height,  
-		    0,  0, width,      height,      0xF800 );
-    FillRect( type, image, pitch, aligned_height, 
-		    20, 20, width - 40, height - 40, 0x07E0 );
-    FillRect( type, image, pitch, aligned_height, 
-		    40, 40, width - 80, height - 80, 0x001F );
+	/* White rectangle */
+	fill_rect( type, image, pitch, 0,  0,    
+			width,      height,      0xFFFF );
+	/* Red Rectangle */
+	fill_rect( type, image, pitch, 0,  0,    
+			width,      height,      0xF800 );
+	/* Green Outline */
+	fill_rect( type, image, pitch, 20, 20,   
+			width - 40, height - 40, 0x07E0 );
+	/* Grey Rectangle */
+	fill_rect( type, image, pitch, 40, 40,   
+			width - 80, height - 80, 0x001F );
+    } else image = data;
 
     vars->elements[index].resource = vc_dispmanx_resource_create( type,
                                         width,
                                         height,
                                         &vars->elements[index].vc_image_ptr );
     assert( vars->elements[index].resource );
-
     vc_dispmanx_rect_set( &dst_rect, 0, 0, width, height);
     ret = vc_dispmanx_resource_write_data(  vars->elements[index].resource,
                                             type,
@@ -237,8 +242,7 @@ static void create_square(dispmanx_data_t *vars, int index,
                                             image,
                                             &dst_rect );
     assert( ret == 0 );
-
-    free(image);
+    if (data == NULL) free(image);
 
     /* Render element */
     vars->update = vc_dispmanx_update_start( 10 );
@@ -292,19 +296,26 @@ static void close_overlay(dispmanx_data_t *vars) {
     assert( ret == 0 );
 }
 
-
 static void *overlay_func(void *p) {
-    stream_sleep();
-    dispmanx_data_t dispmanx_data;
     int height, width;
+    dispmanx_data_t dispmanx_data;
+    uint16_t **overlays = (uint16_t **) p;
+
+    stream_sleep();
 
     init_overlay(&dispmanx_data, OVERLAY_DISPLAY);
     height = dispmanx_data.info.height;
     width = dispmanx_data.info.width;
 
-    create_square(&dispmanx_data, 0, 0, 0, 80, 800, 120);
-    create_square(&dispmanx_data, 1, 100, 100, 80, 800, 120);
-    sleep(5);
+    create_square(&dispmanx_data, 0, 
+		    0, 0,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
+		    120, overlays[0]);
+    create_square(&dispmanx_data, 1, 
+		    width - OVERLAY_WIDTH, 0,
+		    OVERLAY_WIDTH, OVERLAY_HEIGHT,
+		    120, overlays[1]);
+    sleep(500);
     destroy_square(&dispmanx_data, 0);
     destroy_square(&dispmanx_data, 1);
 
@@ -345,7 +356,7 @@ static void set_stream(int stream) {
     pthread_mutex_unlock(&game_data.lock);
 }
 
-static void *stream_func(void *is_p) {
+static void *stream_func(void *p) {
     while (1) {
 	pthread_mutex_lock(&game_data.lock);
 	game_data.state = get_game_state(game_data.state);
@@ -416,16 +427,42 @@ static int loop_callback(OMXReader *reader) {
     return 1;
 }
 
+static int read_overlay_data(const char *filename, uint16_t ***overlays) {
+    int i;
+    FILE *fp;
+    int retval = 0;
+
+    if (!(fp = fopen(filename, "r"))) return -1;
+
+    *overlays = (uint16_t **) malloc(sizeof(uint16_t *) * NUM_OVERLAYS);
+    assert(*overlays);
+
+    for (i = 0; i < NUM_OVERLAYS; i++) {
+	(*overlays)[i] = (uint16_t *) calloc(1, OVERLAY_PITCH * OVERLAY_HEIGHT);
+	assert((*overlays)[i]);
+	fread((*overlays)[i], 1, OVERLAY_PITCH * OVERLAY_HEIGHT, fp);
+    }
+
+    fclose(fp);
+    return retval;
+}
+
 #define OMX_PLAYER_ARGS	2
 #define OMX_PLAYER_ARG0	"omx_game"
 #define OMX_PLAYER_ARG1 "/home/pi/media.mp4"
+#define OVERLAY_DATA "/home/pi/overlays.rgb565"
 int main(void) {
     int argc = OMX_PLAYER_ARGS;
     char *argv[OMX_PLAYER_ARGS] = { 
 	    (char *) OMX_PLAYER_ARG0, (char *) OMX_PLAYER_ARG1 } ;
     OMXPlayerInterface *player;
     pthread_t stream_thread, overlay_thread, uart_thread, data_thread;
+    uint16_t **overlays;
 
+    if (read_overlay_data(OVERLAY_DATA, &overlays) < 0) {
+	printf("Couldn't open overlay data\n");
+	return 1;
+    }
 #if 0
     if (setup_uart() < 0) {
 	printf("Unable to open uart\n");
@@ -439,7 +476,7 @@ int main(void) {
     game_data.stream = ATTRACT_STREAM;
 
     pthread_create(&stream_thread, NULL, stream_func, NULL);
-    pthread_create(&overlay_thread, NULL, overlay_func, NULL);
+    pthread_create(&overlay_thread, NULL, overlay_func, overlays);
     //pthread_create(&uart_thread, NULL, uart_func, NULL);
     //pthread_create(&data_thread, NULL, data_func, NULL);
     
