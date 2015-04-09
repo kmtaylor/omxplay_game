@@ -2,10 +2,7 @@ class OMXPlayerInterface {
     typedef int (*callback_func_t)(OMXReader *reader);
 
     public:
-	OMXPlayerInterface() {
-	    callback_func = NULL;
-	    loop_func = NULL;
-	}
+	OMXPlayerInterface() : callback_func(), loop_func() {}
 
 	void set_callback(callback_func_t func) {
 	    callback_func = func;

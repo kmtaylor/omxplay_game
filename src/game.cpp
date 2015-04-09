@@ -1,6 +1,8 @@
 #include <alsa/asoundlib.h>
 #include <stdint.h>
 
+#include <bcm_host.h>
+
 #include "OMXReader.h"
 #include "omxplayer.h"
 
@@ -8,6 +10,9 @@
 #define PACKET_SIZE 3
 
 #define UART_NAME "hw:1"
+
+#define OVERLAY_DISPLAY	0
+#define OVERLAY_LAYER	1
 
 typedef struct s_control_packet control_packet;
 
@@ -46,6 +51,15 @@ static struct s_game_data game_data;
 #define WINNER1_STREAM		3
 #define WINNER2_STREAM		4
 
+static void stream_sleep(void) {
+    pthread_mutex_lock(&game_data.lock);
+    while (!game_data.change_state)
+	pthread_cond_wait(&game_data.state_changed, &game_data.lock);
+    game_data.change_state = 0;
+    pthread_mutex_unlock(&game_data.lock);
+}
+
+#if 0
 static int setup_uart(void) {
     return snd_rawmidi_open(&game_data.input, &game_data.output, UART_NAME, 0);
 }
@@ -104,13 +118,13 @@ static void read_uart(void) {
     }
 }
 
-static int uart_func(void *p) {
+static void *uart_func(void *p) {
     while(1) read_uart();
 
-    return 0;
+    return NULL;
 }
 
-static int data_func(void *p) {
+static void *data_func(void *p) {
     control_packet *packet;
     while (1) {
 	pthread_mutex_lock(&game_data.lock);
@@ -126,7 +140,7 @@ static int data_func(void *p) {
 		if (packet->value == 1 && ((packet->instruction & 0xf) == 0)) {
 		    game_data.change_state = 1;
 		    game_data.start_game = 1;
-		    pthread_cond_signal(&game_data.state_changed);
+		    pthread_cond_broadcast(&game_data.state_changed);
 		}
 		break;
 	    case 0x02: /* Analogue input */
@@ -138,135 +152,165 @@ static int data_func(void *p) {
 
 	free(packet);
     }
-    return 0;
-}
-
-#if 0
-/* Return index of lower left pixel of bar graph, from percentage screen size */
-static int bar_origin(SDL_Overlay *overlay, int accross, int down, int div) {
-    int line_no, pixel_address;
-    line_no = (down/100.0) * overlay->h / div;
-    pixel_address = line_no * overlay->w / div;
-    pixel_address += (accross/100.0) * overlay->w / div;
-    return pixel_address;
-}
-
-/* Return bar width in pixels from percentage of screen size */
-static int bar_width(SDL_Overlay *overlay, int accross) {
-    return (accross/100.0) * overlay->w;
-}
-
-/* Return bar height in lines from percentage of screen size */
-static int bar_height(SDL_Overlay *overlay, int up) {
-    return  (up/100.0) * overlay->h;
-}
-
-static double shape(int i, int width) {
-    if (i > width*7.0/8.0) i = width - i; 
-    if (i < width/8.0) return i / (width/8.0);
-    return 1;
-}
-
-static void draw_horizontal_line(SDL_Overlay *overlay, int origin, int width,
-		uint8_t colour, int layer) {
-    int i;
-    for (i = 0; i < width; i++) {
-	if (layer == 0)
-	    overlay->pixels[layer][i + origin] = colour * shape(i, width);
-	else
-	    overlay->pixels[layer][i + origin] = colour;
-    }
-}
-
-static int controller_weight(int controller) {
-    int raw_val;
-
-    pthread_mutex_lock(&game_data.lock);
-    raw_val = game_data.controller[controller & 1];
-    pthread_mutex_unlock(&game_data.lock);
-
-    return 100.0 * (1.0 - exp(-raw_val / 80.0));
-}
-
-#define LEFT_BAR_ORIGIN_ACCROSS	    3
-#define LEFT_BAR_ORIGIN_DOWN	    98
-#define LEFT_BAR_WIDTH		    12
-#define RIGHT_BAR_ORIGIN_ACCROSS    85
-#define RIGHT_BAR_ORIGIN_DOWN	    98
-#define RIGHT_BAR_WIDTH		    12
-#define BAR_HEIGHT		    94
-#define BAR_COLOUR_RED		    128
-#define BAR_COLOUR_GREEN	    0
-#define BAR_COLOUR_BLUE		    0
-void frame_modify_hook(SDL_Overlay *overlay) {
-    int i;
-    int origin, pixel_height, pixel_width;
-
-    if (game_data.state != GAME_MODE) return;
-
-    SDL_LockYUVOverlay (overlay);
-
-    /* Left player bar */
-    pixel_height = bar_height(overlay, controller_weight(0));
-    for (i = 0; i < pixel_height; i++) {
-	origin = bar_origin(overlay, LEFT_BAR_ORIGIN_ACCROSS,
-			    LEFT_BAR_ORIGIN_DOWN, 1);
-	origin -= i * overlay->w;
-	pixel_width = bar_width(overlay, LEFT_BAR_WIDTH);
-	pixel_width *= (1.0) * i / bar_height(overlay, BAR_HEIGHT);
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_Y(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED), 0);
-    }
-    for (i = 0; i < pixel_height / 2; i++) {
-	origin = bar_origin(overlay, LEFT_BAR_ORIGIN_ACCROSS,
-			    LEFT_BAR_ORIGIN_DOWN, 2);
-	origin -= i * overlay->w / 2;
-	pixel_width = bar_width(overlay, LEFT_BAR_WIDTH) / 2;
-	pixel_width *= (2.0) * i / bar_height(overlay, BAR_HEIGHT);
-	pixel_width += 1;
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_U(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED, 0), 1);
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_V(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED, 0), 2);
-    }
-
-    /* Right player bar */
-    pixel_height = bar_height(overlay, controller_weight(1));
-    for (i = 0; i < pixel_height; i++) {
-	origin = bar_origin(overlay, RIGHT_BAR_ORIGIN_ACCROSS,
-			    RIGHT_BAR_ORIGIN_DOWN, 1);
-	origin -= i * overlay->w;
-	pixel_width = bar_width(overlay, RIGHT_BAR_WIDTH);
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_Y_CCIR(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED), 0);
-    }
-    for (i = 0; i < pixel_height / 2; i++) {
-	origin = bar_origin(overlay, RIGHT_BAR_ORIGIN_ACCROSS,
-			    RIGHT_BAR_ORIGIN_DOWN, 2);
-	origin -= i * overlay->w / 2;
-	pixel_width = bar_width(overlay, RIGHT_BAR_WIDTH) / 2;
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_U_CCIR(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED, 0), 1);
-	draw_horizontal_line(overlay, origin, pixel_width,
-			RGB_TO_V_CCIR(BAR_COLOUR_BLUE, BAR_COLOUR_GREEN,
-				BAR_COLOUR_RED, 0), 2);
-    }
-
-    SDL_UnlockYUVOverlay (overlay);
+    return NULL;
 }
 #endif
 
-static void stream_sleep(void) {
-    pthread_mutex_lock(&game_data.lock);
-    while (!game_data.change_state)
-	pthread_cond_wait(&game_data.state_changed, &game_data.lock);
-    game_data.change_state = 0;
-    pthread_mutex_unlock(&game_data.lock);
+#ifndef ALIGN_UP
+#define ALIGN_UP(x,y)  ((x + (y)-1) & ~((y)-1))
+#endif
+
+typedef struct {
+    DISPMANX_RESOURCE_HANDLE_T  resource;
+    DISPMANX_ELEMENT_HANDLE_T   element;
+    uint32_t                    vc_image_ptr;
+} dispmanx_element_t;
+
+#define NUM_DISPMANX_ELEMENTS 4
+typedef struct {
+    DISPMANX_DISPLAY_HANDLE_T   display;
+    DISPMANX_MODEINFO_T         info;
+    DISPMANX_UPDATE_HANDLE_T    update;
+    dispmanx_element_t		elements[NUM_DISPMANX_ELEMENTS];
+} dispmanx_data_t;
+
+
+static void FillRect(	VC_IMAGE_TYPE_T type, 
+			void *image, 
+			int pitch, 
+			int aligned_height, 
+			int x, int y, int w, int h, int val ) {
+    int row;
+    int col;
+
+    uint16_t *line = (uint16_t *)image + y * (pitch>>1) + x;
+
+    for ( row = 0; row < h; row++ ) {
+        for ( col = 0; col < w; col++ ) {
+            line[col] = val;
+        }
+        line += (pitch>>1);
+    }
+}
+
+static void create_square(dispmanx_data_t *vars, int index,
+		int x, int y, int width, int height, uint8_t opacity) {
+    int ret;
+    VC_RECT_T src_rect;
+    VC_RECT_T dst_rect;
+    VC_IMAGE_TYPE_T type = VC_IMAGE_RGB565;
+    int pitch = ALIGN_UP(width*2, 32);
+    int aligned_height = ALIGN_UP(height, 16);
+    VC_DISPMANX_ALPHA_T alpha; 
+    void *image;
+
+    /* Setup Opacity */
+    alpha.flags = (DISPMANX_FLAGS_ALPHA_T) (
+		    DISPMANX_FLAGS_ALPHA_FROM_SOURCE |
+		    DISPMANX_FLAGS_ALPHA_FIXED_ALL_PIXELS);
+    alpha.opacity = opacity;
+    alpha.mask = 0;
+
+    /* Allocate image and convert to VC format */
+    image = calloc( 1, pitch * height );
+    assert(image);
+
+    FillRect( type, image, pitch, aligned_height, 
+		    0,  0, width,      height,      0xFFFF );
+    FillRect( type, image, pitch, aligned_height,  
+		    0,  0, width,      height,      0xF800 );
+    FillRect( type, image, pitch, aligned_height, 
+		    20, 20, width - 40, height - 40, 0x07E0 );
+    FillRect( type, image, pitch, aligned_height, 
+		    40, 40, width - 80, height - 80, 0x001F );
+
+    vars->elements[index].resource = vc_dispmanx_resource_create( type,
+                                        width,
+                                        height,
+                                        &vars->elements[index].vc_image_ptr );
+    assert( vars->elements[index].resource );
+
+    vc_dispmanx_rect_set( &dst_rect, 0, 0, width, height);
+    ret = vc_dispmanx_resource_write_data(  vars->elements[index].resource,
+                                            type,
+                                            pitch,
+                                            image,
+                                            &dst_rect );
+    assert( ret == 0 );
+
+    free(image);
+
+    /* Render element */
+    vars->update = vc_dispmanx_update_start( 10 );
+    assert( vars->update );
+
+    vc_dispmanx_rect_set( &src_rect, 0, 0, width << 16, height << 16 );
+    vc_dispmanx_rect_set( &dst_rect, x, y, width, height );
+
+    vars->elements[index].element = vc_dispmanx_element_add(    vars->update,
+                                                vars->display,
+                                                OVERLAY_LAYER,
+                                                &dst_rect,
+                                                vars->elements[index].resource,
+                                                &src_rect,
+                                                DISPMANX_PROTECTION_NONE,
+                                                &alpha,
+                                                NULL,
+                                                (DISPMANX_TRANSFORM_T) 
+						    VC_IMAGE_ROT0 );
+
+    ret = vc_dispmanx_update_submit_sync( vars->update );
+    assert( ret == 0 );
+}
+
+static void destroy_square(dispmanx_data_t *vars, int index) {
+    int ret;
+    vars->update = vc_dispmanx_update_start( 10 );
+    assert( vars->update );
+    ret = vc_dispmanx_element_remove( vars->update, 
+		    vars->elements[index].element );
+    assert( ret == 0 );
+    ret = vc_dispmanx_update_submit_sync( vars->update );
+    assert( ret == 0 );
+    ret = vc_dispmanx_resource_delete( vars->elements[index].resource );
+    assert( ret == 0 );
+}
+
+static void init_overlay(dispmanx_data_t *vars, int display) {
+    int ret;
+
+    vars->display = vc_dispmanx_display_open( display );
+    ret = vc_dispmanx_display_get_info( vars->display, &vars->info);
+    assert(ret == 0);
+
+}
+
+static void close_overlay(dispmanx_data_t *vars) {
+    int ret;
+
+    ret = vc_dispmanx_display_close( vars->display );
+    assert( ret == 0 );
+}
+
+
+static void *overlay_func(void *p) {
+    stream_sleep();
+    dispmanx_data_t dispmanx_data;
+    int height, width;
+
+    init_overlay(&dispmanx_data, OVERLAY_DISPLAY);
+    height = dispmanx_data.info.height;
+    width = dispmanx_data.info.width;
+
+    create_square(&dispmanx_data, 0, 0, 0, 80, 800, 120);
+    create_square(&dispmanx_data, 1, 100, 100, 80, 800, 120);
+    sleep(5);
+    destroy_square(&dispmanx_data, 0);
+    destroy_square(&dispmanx_data, 1);
+
+    close_overlay(&dispmanx_data);
+
+    return NULL;
 }
 
 static int choose_winner(void) {
@@ -341,7 +385,7 @@ static void *stream_func(void *is_p) {
 	}
     }
 
-    return 0;
+    return NULL;
 }
 
 static int control_callback(OMXReader *reader) {
@@ -366,9 +410,9 @@ static int control_callback(OMXReader *reader) {
 static int loop_callback(OMXReader *reader) {
     pthread_mutex_lock(&game_data.lock);
     game_data.change_state = 1;
-    pthread_cond_signal(&game_data.state_changed);
+    pthread_cond_broadcast(&game_data.state_changed);
     pthread_mutex_unlock(&game_data.lock);
-    sleep(6);
+    usleep(5800000);
     return 1;
 }
 
@@ -380,7 +424,7 @@ int main(void) {
     char *argv[OMX_PLAYER_ARGS] = { 
 	    (char *) OMX_PLAYER_ARG0, (char *) OMX_PLAYER_ARG1 } ;
     OMXPlayerInterface *player;
-    pthread_t stream_thread, uart_thread, data_thread;
+    pthread_t stream_thread, overlay_thread, uart_thread, data_thread;
 
 #if 0
     if (setup_uart() < 0) {
@@ -395,6 +439,7 @@ int main(void) {
     game_data.stream = ATTRACT_STREAM;
 
     pthread_create(&stream_thread, NULL, stream_func, NULL);
+    pthread_create(&overlay_thread, NULL, overlay_func, NULL);
     //pthread_create(&uart_thread, NULL, uart_func, NULL);
     //pthread_create(&data_thread, NULL, data_func, NULL);
     
@@ -405,3 +450,5 @@ int main(void) {
 
     return 0;
 }
+
+

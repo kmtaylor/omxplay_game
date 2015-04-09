@@ -7,6 +7,8 @@ SYSROOT	:= /opt/bcm-rootfs
 TOOLCHAIN := $(TOOLS)/$(GCC_VER)/bin/$(HOST)
 
 CFLAGS += -I /opt/bcm-rootfs/usr/local/include
+CFLAGS += -I /opt/bcm-rootfs/opt/vc/include
+CFLAGS += -I /opt/bcm-rootfs/opt/vc/include/interface/vcos/pthreads/
 CFLAGS += -I ../../omxplayer
 
 CFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -DTARGET_POSIX \
