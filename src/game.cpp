@@ -37,13 +37,21 @@ struct s_game_data {
     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t data_ready = PTHREAD_COND_INITIALIZER;
     pthread_cond_t state_changed = PTHREAD_COND_INITIALIZER;
+    pthread_cond_t stream_changed = PTHREAD_COND_INITIALIZER;
 
-    int change_state, start_game;
+    int winner;
+
+    int change_state, start_game, change_stream, allow_start;
     enum state_enum state;
+    enum state_enum stream_state;
     int stream;
+
+    int finish_overlay;
+    int pause_overlay;
 
     snd_rawmidi_t *output, *input;
     uint8_t controller[NUM_CONTROLLERS];
+    uint8_t score[NUM_CONTROLLERS];
     uint8_t cur_instruction;
     control_packet *packet_list;
 };
@@ -56,15 +64,29 @@ static struct s_game_data game_data;
 #define WINNER1_STREAM		3
 #define WINNER2_STREAM		4
 
-static void stream_sleep(int update_state) {
+static void state_sleep(int update_state) {
     pthread_mutex_lock(&game_data.lock);
     while (!game_data.change_state)
 	pthread_cond_wait(&game_data.state_changed, &game_data.lock);
-    if (update_state) game_data.change_state = 0;
+    if (update_state) {
+	//pthread_mutex_unlock(&game_data.lock);
+	//sleep(1);
+	//pthread_mutex_lock(&game_data.lock);
+	game_data.change_state = 0;
+    }
     pthread_mutex_unlock(&game_data.lock);
 }
 
-#if 0
+static void stream_sleep(void) {
+    pthread_mutex_lock(&game_data.lock);
+    game_data.change_stream = 0;
+    while (!game_data.change_stream)
+	pthread_cond_wait(&game_data.stream_changed, &game_data.lock);
+    game_data.change_stream = 0;
+    pthread_mutex_unlock(&game_data.lock);
+}
+
+#if 1
 static int setup_uart(void) {
     return snd_rawmidi_open(&game_data.input, &game_data.output, UART_NAME, 0);
 }
@@ -131,6 +153,7 @@ static void *uart_func(void *p) {
 
 static void *data_func(void *p) {
     control_packet *packet;
+    int do_print = 0;
     while (1) {
 	pthread_mutex_lock(&game_data.lock);
 	/* Wait until we have some packets to read */
@@ -143,17 +166,24 @@ static void *data_func(void *p) {
 	switch (packet->instruction >> 4) {
 	    case 0x01: /* Digital input */
 		if (packet->value == 1 && ((packet->instruction & 0xf) == 0)) {
-		    game_data.change_state = 1;
-		    game_data.start_game = 1;
-		    pthread_cond_broadcast(&game_data.state_changed);
+		    if (game_data.allow_start) {
+			game_data.change_state = 1;
+			game_data.start_game = 1;
+			game_data.allow_start = 0;
+			pthread_cond_broadcast(&game_data.state_changed);
+		    }
 		}
 		break;
 	    case 0x02: /* Analogue input */
 		game_data.controller[packet->instruction & 1] = packet->value;
+		//do_print = 1;
 		break;
 	}
 
 	pthread_mutex_unlock(&game_data.lock);
+	if (do_print)
+	    printf("controllers: %i, %i\n", game_data.controller[0],
+					    game_data.controller[1]);
 
 	free(packet);
     }
@@ -381,16 +411,42 @@ static void power_bar(dispmanx_data_t *dispmanx_data, int index, int power) {
     }
 }
 
+static int controller_weight(int controller) {
+    int raw_val;
+    int weighted_val;
+
+    pthread_mutex_lock(&game_data.lock);
+    raw_val = game_data.controller[controller & 1];
+    if (controller == 0)
+	weighted_val = 100.0 * (1.0 - exp(-(raw_val - 100) / 80.0));
+    else
+	weighted_val = 100.0 * (1.0 - exp(-(raw_val - 100) / 80.0));
+    game_data.score[controller & 1] = weighted_val;
+    pthread_mutex_unlock(&game_data.lock);
+
+    return weighted_val;
+}
+
 static void update_power_bars(dispmanx_data_t *dispmanx_data) {
     int exit = 0;
-    int i = 1;
     int destroy_layer_1 = 0;
     int destroy_layer_2 = 0;
     int current_layer = 1;
+    int pause = 0;
+    
+    int power_level_l;
+    int power_level_r;
 
     while (1) {
 	pthread_mutex_lock(&game_data.lock);
-	if (game_data.state != GAME_MODE) exit = 1;
+	if (game_data.finish_overlay) {
+	    game_data.finish_overlay = 0;
+	    exit = 1;
+	}
+	if (game_data.pause_overlay) {
+	    game_data.pause_overlay = 0;
+	    pause = 1;
+	}
 	pthread_mutex_unlock(&game_data.lock);
 
 	if (exit) {
@@ -406,10 +462,18 @@ static void update_power_bars(dispmanx_data_t *dispmanx_data) {
 	    return;
 	}
 
+	if (pause) {
+	    usleep(10000);
+	    continue;
+	}
+
+	power_level_l = controller_weight(0);
+	power_level_r = controller_weight(1);
+
 	if (current_layer == 1) {
 	    /* Create new layer */
-	    power_bar(dispmanx_data, OVERLAY_POWER_L_1, i);
-	    power_bar(dispmanx_data, OVERLAY_POWER_R_1, 100 -i);
+	    power_bar(dispmanx_data, OVERLAY_POWER_L_1, power_level_l);
+	    power_bar(dispmanx_data, OVERLAY_POWER_R_1, power_level_r);
 	    destroy_layer_1 = 1;
 
 	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_L_2, 0,
@@ -427,8 +491,8 @@ static void update_power_bars(dispmanx_data_t *dispmanx_data) {
 	    current_layer = 2;
 	} else {
 	    /* Create new layer */
-	    power_bar(dispmanx_data, OVERLAY_POWER_L_2, i);
-	    power_bar(dispmanx_data, OVERLAY_POWER_R_2, 100 -i);
+	    power_bar(dispmanx_data, OVERLAY_POWER_L_2, power_level_l);
+	    power_bar(dispmanx_data, OVERLAY_POWER_R_2, power_level_r);
 	    destroy_layer_2 = 1;
 
 	    toggle_visibility(dispmanx_data,	OVERLAY_POWER_L_1, 0,
@@ -445,11 +509,6 @@ static void update_power_bars(dispmanx_data_t *dispmanx_data) {
 
 	    current_layer = 1;
 	}
-
-	usleep(10000);
-
-	i++;
-	if (i >= 100) i = 1;
     }
 }
 
@@ -457,14 +516,14 @@ static void *overlay_func(void *p) {
     dispmanx_data_t dispmanx_data;
     uint16_t **overlays = (uint16_t **) p;
 
-    stream_sleep(0);
+    state_sleep(0);
     init_overlay(&dispmanx_data, OVERLAY_DISPLAY);
 
     while (1) {
-	/* Wait for correct game mode */
+	/* Wait for correct game stream */
 	pthread_mutex_lock(&game_data.lock);
-	while (game_data.state != GAME_MODE)
-	    pthread_cond_wait(&game_data.state_changed, &game_data.lock);
+	while (game_data.stream_state != GAME_MODE)
+	    pthread_cond_wait(&game_data.stream_changed, &game_data.lock);
 	pthread_mutex_unlock(&game_data.lock);
 
 	show_overlays(&dispmanx_data, overlays);
@@ -473,6 +532,12 @@ static void *overlay_func(void *p) {
 	update_power_bars(&dispmanx_data);
 	
 	hide_overlays(&dispmanx_data);
+
+	pthread_mutex_lock(&game_data.lock);
+	while (game_data.stream_state != ATTRACT_MODE)
+	    pthread_cond_wait(&game_data.stream_changed, &game_data.lock);
+	pthread_mutex_unlock(&game_data.lock);
+
     }
 
     close_overlay(&dispmanx_data);
@@ -483,7 +548,7 @@ static void *overlay_func(void *p) {
 static int choose_winner(void) {
     int retval;
     
-    if (game_data.controller[0] > game_data.controller[1]) retval = 0;
+    if (game_data.score[0] > game_data.score[1]) retval = 0;
     else retval = 1;
     
     return retval;
@@ -492,12 +557,15 @@ static int choose_winner(void) {
 static enum state_enum get_game_state(enum state_enum old_state) {
     switch (old_state) {
 	case ATTRACT_MODE:
-	    if (game_data.start_game) return COUNTDOWN_MODE;
+	    if (game_data.start_game) {
+		game_data.start_game = 0;
+		return COUNTDOWN_MODE;
+	    }
 	    else return ATTRACT_MODE;
 	case COUNTDOWN_MODE:
 	    return GAME_MODE;
 	case GAME_MODE:
-	    if (choose_winner()) return WINNER1_MODE;
+	    if (game_data.winner) return WINNER1_MODE;
 	    else return WINNER2_MODE;
 	case WINNER1_MODE:
 	case WINNER2_MODE:
@@ -520,34 +588,49 @@ static void *stream_func(void *p) {
 	switch (game_data.state) {
 	    case ATTRACT_MODE:
 		set_stream(ATTRACT_STREAM);
-		stream_sleep(1);
+		state_sleep(1);
 		break;
 
 	    case COUNTDOWN_MODE:
 		set_stream(COUNTDOWN_STREAM);
-		stream_sleep(1);
+		//printf("entering sleep\n");
+		state_sleep(1);
+		//printf("left sleep\n");
 		break;
 
 	    case GAME_MODE:
 		set_stream(GAME_STREAM);
+
+		stream_sleep();
+		sleep(7);
+
 		pthread_mutex_lock(&game_data.lock);
-		game_data.start_game = 0;
+		game_data.pause_overlay = 1;
+		game_data.winner = choose_winner();
 		pthread_mutex_unlock(&game_data.lock);
-		stream_sleep(1);
+		sleep(1);
+		
+		state_sleep(1);
+
+		pthread_mutex_lock(&game_data.lock);
+		game_data.finish_overlay = 1;
+		game_data.start_game = 0;
+		game_data.allow_start = 1;
+		pthread_mutex_unlock(&game_data.lock);
 		break;
 
 	    case WINNER1_MODE:
 		set_stream(WINNER1_STREAM);
-		//write_uart(0x11, 0x01);
-		stream_sleep(1);
-		//write_uart(0x11, 0x00);
+		write_uart(0x11, 0x01);
+		state_sleep(1);
+		write_uart(0x11, 0x00);
 		break;
 
 	    case WINNER2_MODE:
 		set_stream(WINNER2_STREAM);
-		//write_uart(0x12, 0x01);
-		stream_sleep(1);
-		//write_uart(0x12, 0x00);
+		write_uart(0x12, 0x01);
+		state_sleep(1);
+		write_uart(0x12, 0x00);
 		break;
 	}
     }
@@ -575,10 +658,19 @@ static int control_callback(OMXReader *reader) {
 }
 
 static int loop_callback(OMXReader *reader) {
-    usleep(6000000);
+	//printf("triggering state\n");
     pthread_mutex_lock(&game_data.lock);
     game_data.change_state = 1;
     pthread_cond_broadcast(&game_data.state_changed);
+    pthread_mutex_unlock(&game_data.lock);
+
+    usleep(6000000);
+
+	//printf("triggering stream\n");
+    pthread_mutex_lock(&game_data.lock);
+    game_data.stream_state = game_data.state;
+    game_data.change_stream = 1;
+    pthread_cond_broadcast(&game_data.stream_changed);
     pthread_mutex_unlock(&game_data.lock);
     return 1;
 }
@@ -619,22 +711,27 @@ int main(void) {
 	printf("Couldn't open overlay data\n");
 	return 1;
     }
-#if 0
+#if 1
     if (setup_uart() < 0) {
 	printf("Unable to open uart\n");
 	return 1;
     }
 #endif
     game_data.packet_list = NULL,
-    game_data.start_game = 1,
+    game_data.start_game = 0,
+    game_data.allow_start = 1,
     game_data.change_state = 0,
+    game_data.change_stream = 0,
     game_data.state = ATTRACT_MODE,
+    game_data.stream_state = ATTRACT_MODE,
     game_data.stream = ATTRACT_STREAM;
+    game_data.pause_overlay = 0;
+    game_data.finish_overlay = 0;
 
     pthread_create(&stream_thread, NULL, stream_func, NULL);
     pthread_create(&overlay_thread, NULL, overlay_func, overlays);
-    //pthread_create(&uart_thread, NULL, uart_func, NULL);
-    //pthread_create(&data_thread, NULL, data_func, NULL);
+    pthread_create(&uart_thread, NULL, uart_func, NULL);
+    pthread_create(&data_thread, NULL, data_func, NULL);
     
     player = OMXPlayerInterface::get_interface();
     player->set_callback(control_callback);
