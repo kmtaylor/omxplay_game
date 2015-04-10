@@ -417,12 +417,14 @@ static int controller_weight(int controller) {
 
     pthread_mutex_lock(&game_data.lock);
     raw_val = game_data.controller[controller & 1];
-    if (controller == 0)
-	weighted_val = 100.0 * (1.0 - exp(-(raw_val - 100) / 80.0));
+    if (controller == 1)
+	weighted_val = 130.0 * (1.0 - exp(-((raw_val - 114)*1.96) / 240.0)) + 10;
     else
-	weighted_val = 100.0 * (1.0 - exp(-(raw_val - 100) / 80.0));
+	weighted_val = 130.0 * (1.0 - exp(-((raw_val - 217)*8.79) / 240.0)) + 10;
     game_data.score[controller & 1] = weighted_val;
     pthread_mutex_unlock(&game_data.lock);
+
+    //printf("raw %i: %i\n", controller, raw_val);
 
     return weighted_val;
 }
