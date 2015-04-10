@@ -69,9 +69,6 @@ static void state_sleep(int update_state) {
     while (!game_data.change_state)
 	pthread_cond_wait(&game_data.state_changed, &game_data.lock);
     if (update_state) {
-	//pthread_mutex_unlock(&game_data.lock);
-	//sleep(1);
-	//pthread_mutex_lock(&game_data.lock);
 	game_data.change_state = 0;
     }
     pthread_mutex_unlock(&game_data.lock);
@@ -86,7 +83,6 @@ static void stream_sleep(void) {
     pthread_mutex_unlock(&game_data.lock);
 }
 
-#if 1
 static int setup_uart(void) {
     return snd_rawmidi_open(&game_data.input, &game_data.output, UART_NAME, 0);
 }
@@ -153,7 +149,7 @@ static void *uart_func(void *p) {
 
 static void *data_func(void *p) {
     control_packet *packet;
-    int do_print = 0;
+
     while (1) {
 	pthread_mutex_lock(&game_data.lock);
 	/* Wait until we have some packets to read */
@@ -176,20 +172,15 @@ static void *data_func(void *p) {
 		break;
 	    case 0x02: /* Analogue input */
 		game_data.controller[packet->instruction & 1] = packet->value;
-		//do_print = 1;
 		break;
 	}
 
 	pthread_mutex_unlock(&game_data.lock);
-	if (do_print)
-	    printf("controllers: %i, %i\n", game_data.controller[0],
-					    game_data.controller[1]);
 
 	free(packet);
     }
     return NULL;
 }
-#endif
 
 #define OVERLAY_POWER_L_1   0
 #define OVERLAY_POWER_L_2   1
@@ -418,13 +409,13 @@ static int controller_weight(int controller) {
     pthread_mutex_lock(&game_data.lock);
     raw_val = game_data.controller[controller & 1];
     if (controller == 1)
-	weighted_val = 130.0 * (1.0 - exp(-((raw_val - 114)*1.96) / 240.0)) + 10;
+	weighted_val = 
+		130.0 * (1.0 - exp(-((raw_val - 114)*1.96) / 240.0)) + 10;
     else
-	weighted_val = 130.0 * (1.0 - exp(-((raw_val - 217)*8.79) / 240.0)) + 10;
+	weighted_val = 
+		130.0 * (1.0 - exp(-((raw_val - 217)*8.79) / 240.0)) + 10;
     game_data.score[controller & 1] = weighted_val;
     pthread_mutex_unlock(&game_data.lock);
-
-    //printf("raw %i: %i\n", controller, raw_val);
 
     return weighted_val;
 }
@@ -595,9 +586,7 @@ static void *stream_func(void *p) {
 
 	    case COUNTDOWN_MODE:
 		set_stream(COUNTDOWN_STREAM);
-		//printf("entering sleep\n");
 		state_sleep(1);
-		//printf("left sleep\n");
 		break;
 
 	    case GAME_MODE:
@@ -660,7 +649,6 @@ static int control_callback(OMXReader *reader) {
 }
 
 static int loop_callback(OMXReader *reader) {
-	//printf("triggering state\n");
     pthread_mutex_lock(&game_data.lock);
     game_data.change_state = 1;
     pthread_cond_broadcast(&game_data.state_changed);
@@ -668,7 +656,6 @@ static int loop_callback(OMXReader *reader) {
 
     usleep(6000000);
 
-	//printf("triggering stream\n");
     pthread_mutex_lock(&game_data.lock);
     game_data.stream_state = game_data.state;
     game_data.change_stream = 1;
@@ -713,12 +700,12 @@ int main(void) {
 	printf("Couldn't open overlay data\n");
 	return 1;
     }
-#if 1
+
     if (setup_uart() < 0) {
 	printf("Unable to open uart\n");
 	return 1;
     }
-#endif
+
     game_data.packet_list = NULL,
     game_data.start_game = 0,
     game_data.allow_start = 1,
