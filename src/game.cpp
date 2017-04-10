@@ -46,6 +46,7 @@ struct s_game_data {
     enum state_enum stream_state;
     int stream;
 
+    int start_overlay;
     int finish_overlay;
     int pause_overlay;
 
@@ -515,8 +516,9 @@ static void *overlay_func(void *p) {
     while (1) {
 	/* Wait for correct game stream */
 	pthread_mutex_lock(&game_data.lock);
-	while (game_data.stream_state != GAME_MODE)
+	while (!game_data.start_overlay)
 	    pthread_cond_wait(&game_data.stream_changed, &game_data.lock);
+	game_data.start_overlay = 0;
 	pthread_mutex_unlock(&game_data.lock);
 
 	show_overlays(&dispmanx_data, overlays);
@@ -525,12 +527,6 @@ static void *overlay_func(void *p) {
 	update_power_bars(&dispmanx_data);
 	
 	hide_overlays(&dispmanx_data);
-
-	pthread_mutex_lock(&game_data.lock);
-	while (game_data.stream_state != ATTRACT_MODE)
-	    pthread_cond_wait(&game_data.stream_changed, &game_data.lock);
-	pthread_mutex_unlock(&game_data.lock);
-
     }
 
     close_overlay(&dispmanx_data);
@@ -591,6 +587,9 @@ static void *stream_func(void *p) {
 
 	    case GAME_MODE:
 		set_stream(GAME_STREAM);
+		pthread_mutex_lock(&game_data.lock);
+		game_data.start_overlay = 1;
+		pthread_mutex_unlock(&game_data.lock);
 
 		stream_sleep();
 		sleep(7);
@@ -714,6 +713,7 @@ int main(void) {
     game_data.state = ATTRACT_MODE,
     game_data.stream_state = ATTRACT_MODE,
     game_data.stream = ATTRACT_STREAM;
+    game_data.start_overlay = 0;
     game_data.pause_overlay = 0;
     game_data.finish_overlay = 0;
 

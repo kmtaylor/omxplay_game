@@ -1,4 +1,4 @@
-TOOLS	:= /home/kmtaylor/rpi/tools
+TOOLS	:= /home/kmtaylor/src/rpi/tools
 GCC_VER := arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian
 HOST	:= arm-linux-gnueabihf
 RPATH	:= /home/pi
